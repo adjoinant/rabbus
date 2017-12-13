@@ -35,11 +35,14 @@ Producer.prototype.stop = function(){
 Producer.prototype.publish = producer(function(message, properties, done){
   this._publish(message, properties, done);
 });
-  
+
 Producer.prototype.request = producer(function(message, properties, cb){
   this._request(message, properties, cb);
 });
 
+Producer.prototype.scatterGather = producer(function(message, properties, cb){
+  this._scatterGather(message, properties, cb);
+});
 // Private Members
 // ---------------
 
@@ -77,6 +80,27 @@ Producer.prototype._request = function(msg, properties, cb){
     })
     .catch((err) => {
       this.emitError(err);
+      if (err.message.includes('timeout')) throw err;
+    });
+};
+
+Producer.prototype._scatterGather = function(msg, properties, cb){
+  var rabbit = this.rabbit;
+  var exchange = this.topology.exchange;
+
+  properties = _.extend({}, properties, {
+    body: msg
+  });
+
+  rabbit
+    .scatterGather(exchange.name, properties)
+    .then((replies) => {
+      cb(replies.map(r => r.body));
+      replies.forEach(r => r.ack());
+    })
+    .catch((err) => {
+      this.emitError(err);
+      if (err.message.includes('timeout')) throw err;
     });
 };
 
@@ -100,7 +124,7 @@ function producer(publishMethod){
 
   return function(data, properties){
     var done;
-    
+
     if (!properties) { properties = {}; }
 
     if (_.isFunction(properties)){
