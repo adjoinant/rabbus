@@ -32,21 +32,21 @@ Producer.prototype.stop = function(){
   this.removeAllListeners();
 };
 
-Producer.prototype.publish = producer(function(message, properties, done){
-  this._publish(message, properties, done);
+Producer.prototype.publish = producer(function(message, properties){
+  return this._publish(message, properties);
 });
 
-Producer.prototype.request = producer(function(message, properties, cb){
-  this._request(message, properties, cb);
+Producer.prototype.request = producer(function(message, properties){
+  return this._request(message, properties);
 });
 
-Producer.prototype.scatterGather = producer(function(message, properties, cb){
-  this._scatterGather(message, properties, cb);
+Producer.prototype.scatterGather = producer(function(message, properties){
+  return this._scatterGather(message, properties);
 });
 // Private Members
 // ---------------
 
-Producer.prototype._publish = function(msg, properties, done){
+Producer.prototype._publish = function(msg, properties){
   var rabbit = this.rabbit;
   var exchange = this.topology.exchange;
 
@@ -54,17 +54,10 @@ Producer.prototype._publish = function(msg, properties, done){
     body: msg
   });
 
-  rabbit
-    .publish(exchange.name, properties)
-    .then(() => {
-      if (done){ done(); }
-    })
-    .catch((err) => {
-      this.emitError(err);
-    });
+  return rabbit.publish(exchange.name, properties);
 };
 
-Producer.prototype._request = function(msg, properties, cb){
+Producer.prototype._request = function(msg, properties){
   var rabbit = this.rabbit;
   var exchange = this.topology.exchange;
 
@@ -72,19 +65,15 @@ Producer.prototype._request = function(msg, properties, cb){
     body: msg
   });
 
-  rabbit
+  return rabbit
     .request(exchange.name, properties)
     .then((reply) => {
-      cb(reply.body);
       reply.ack();
-    })
-    .catch((err) => {
-      this.emitError(err);
-      if (err.message.includes('timeout')) throw err;
+      return reply.body;
     });
 };
 
-Producer.prototype._scatterGather = function(msg, properties, cb){
+Producer.prototype._scatterGather = function(msg, properties){
   var rabbit = this.rabbit;
   var exchange = this.topology.exchange;
 
@@ -92,20 +81,12 @@ Producer.prototype._scatterGather = function(msg, properties, cb){
     body: msg
   });
 
-  rabbit
+  return rabbit
     .scatterGather(exchange.name, properties)
     .then((replies) => {
-      cb(replies.map(r => r.body));
       replies.forEach(r => r.ack());
-    })
-    .catch((err) => {
-      this.emitError(err);
-      if (err.message.includes('timeout')) throw err;
+      return replies.map(r => r.body);
     });
-};
-
-Producer.prototype.emitError = function(err){
-  this.emit("error", err);
 };
 
 Producer.prototype._verifyTopology = function(cb){
@@ -123,42 +104,33 @@ Producer.prototype._verifyTopology = function(cb){
 function producer(publishMethod){
 
   return function(data, properties){
-    var done;
+    return new Promise((resolve, reject) => {
+      if (!properties) { properties = {}; }
+      // start the message producer
+      this._verifyTopology((err, topology) => {
+        if (err) { return reject(err); }
 
-    if (!properties) { properties = {}; }
+        this.emit("ready");
 
-    if (_.isFunction(properties)){
-      done = properties;
-      properties = {};
-    } else if (_.isObject(properties)) {
-      done = properties.onComplete;
-      properties.onComplete = undefined;
-    }
+        var middleware = this.middlewareBuilder.build((message, middlewareHeaders, next) => {
+          var headers = _.extend({}, middlewareHeaders, properties.headers);
 
-    // start the message producer
-    this._verifyTopology((err, topology) => {
-      if (err) { return this.emitError(err); }
+          var messageType = topology.messageType || topology.routingKey;
+          var props = _.extend({}, properties, {
+            routingKey: topology.routingKey,
+            type: messageType,
+            headers: headers
+          });
 
-      this.emit("ready");
+          logger.info("Publishing Message With Routing Key '" + topology.routingKey + "'");
+          logger.debug("With Properties");
+          logger.debug(props);
 
-      var middleware = this.middlewareBuilder.build((message, middlewareHeaders, next) => {
-        var headers = _.extend({}, middlewareHeaders, properties.headers);
-
-        var messageType = topology.messageType || topology.routingKey;
-        var props = _.extend({}, properties, {
-          routingKey: topology.routingKey,
-          type: messageType,
-          headers: headers
+          return resolve(publishMethod.call(this, message, props));
         });
 
-        logger.info("Publishing Message With Routing Key '" + topology.routingKey + "'");
-        logger.debug("With Properties");
-        logger.debug(props);
-
-        publishMethod.call(this, message, props, done);
+        return middleware(data, {});
       });
-
-      middleware(data, {});
     });
   };
 }
